@@ -34,6 +34,7 @@ from . import data_service
 from .data_service import REP_IDS
 
 MODEL_NAME = "gpt-4o-mini"
+SENSITIVE_PROSPECT_FIELDS = {"billing_qualification"}
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -56,9 +57,13 @@ def build_prospect_profile(prospect_id: str) -> dict:
     rec = data_service.get_prospect_record(prospect_id)
     if rec is None:
         return {"prospect_profile": None, "found": False}
+    filtered_rec = {
+        key: value for key, value in rec.items()
+        if key not in SENSITIVE_PROSPECT_FIELDS
+    }
     built = {
         "prospect_id": prospect_id,
-        **rec,
+        **filtered_rec,
         "engagement_history": data_service.fetch_engagement_history(prospect_id),
         "account_details": data_service.fetch_account_details(prospect_id),
         "tech_stack": data_service.fetch_tech_stack(prospect_id),
@@ -108,6 +113,10 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
     # Score against the prospect's saved tech stack of record.
+    prospect_profile = {
+        key: value for key, value in prospect_profile.items()
+        if key not in SENSITIVE_PROSPECT_FIELDS
+    }
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
@@ -133,7 +142,8 @@ def get_prospect(prospect_id: str) -> dict:
     contact = {
         "prospect_id": prospect_id,
         **{k: v for k, v in record.items()
-           if k not in ("engagement_history", "account_details", "tech_stack")},
+           if k not in ("engagement_history", "account_details", "tech_stack")
+           and k not in SENSITIVE_PROSPECT_FIELDS},
     }
     return {"prospect": contact, "found": True}
 
