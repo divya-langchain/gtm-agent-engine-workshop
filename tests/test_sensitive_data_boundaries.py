@@ -39,6 +39,18 @@ def test_get_prospect_returns_only_allowed_fields(monkeypatch):
     }
     assert all(field not in json.dumps(result) for field in SENSITIVE_FIELDS)
 
+    email_result = gtm_agent.send_prospect_email.func(
+        result["prospect"],
+        "Hello",
+        "Hi Taylor",
+        runtime=None,
+        from_rep={"name": "Sales Rep", "email": "rep@example.com"},
+    )
+
+    assert email_result["status"] == "sent"
+    assert email_result["to"] == "taylor@example.com"
+    assert all(field not in json.dumps(email_result) for field in SENSITIVE_FIELDS)
+
 
 def test_build_prospect_profile_excludes_billing_data_and_caches_safe_profile(monkeypatch):
     prospect_id = "LEAD-TEST"
