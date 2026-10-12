@@ -15,6 +15,7 @@ Install:
 """
 
 import json
+import math
 import os
 import random
 import uuid
@@ -68,50 +69,68 @@ def build_prospect_profile(prospect_id: str) -> dict:
 
 
 SCORING_PROMPT = (
-    "You are a GTM assistant. Score the prospect's potential for the offering from "
-    "1 to 100 based on how good a fit they are, weighing their annual revenue and "
-    "tech stack. In your justification, explicitly list which of the offering's required "
-    "technologies the prospect has and which required technologies they are missing, naming "
-    "each one. Any missing required technology must lower the tech_stack_match component and "
-    "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this prospect's potential."
+    "You are a GTM assistant. Write a concise justification for the provided prospect score. "
+    "Explain the supplied revenue fit and technology match, explicitly naming the provided "
+    "present and missing required technologies. Accurately reflect the supplied values; "
+    "do not change or contradict them."
 )
 
-from typing import Literal
-
-class RubricBreakdown(BaseModel):
-    revenue_fit: float
-    tech_stack_match: float
-    segment_fit: float
-    component_max: Literal[100] = 100
-
-
-class ProspectScore(BaseModel):
-    score: float
-    max_score: int = 100
+class ProspectJustification(BaseModel):
     justification: str
-    rubric_breakdown: RubricBreakdown
 
 
-_scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_output(ProspectScore)
+_scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_output(ProspectJustification)
+
+
+def _is_finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _offering_has_required_fields(offering):
     "Return True if the offering has the fields needed to score against it."
-    return bool(offering) and bool(offering.get("required_tech_stack")) and \
-        offering.get("min_annual_revenue") is not None and bool(offering.get("description"))
+    if not offering or not isinstance(offering.get("required_tech_stack"), list):
+        return False
+    minimum_revenue = offering.get("min_annual_revenue")
+    return _is_finite_number(minimum_revenue) and minimum_revenue > 0 and bool(offering.get("description"))
 
 
 @tool
 def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+    "Score a prospect using round(0.4 * revenue_fit + 0.6 * tech_stack_match). Pass complete records from build_prospect_profile and lookup_offering, not ids alone."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
     # Score against the prospect's saved tech stack of record.
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
+    required_technologies = offering["required_tech_stack"]
+    prospect_technologies = prospect_profile.get("tech_stack") or []
+    present_technologies = [technology for technology in required_technologies if technology in prospect_technologies]
+    missing_technologies = [technology for technology in required_technologies if technology not in prospect_technologies]
+    tech_stack_match = round(100 * len(present_technologies) / len(required_technologies)) if required_technologies else 100
+
+    minimum_revenue = offering["min_annual_revenue"]
+    annual_revenue = prospect_profile.get("annual_revenue", 0)
+    if not _is_finite_number(annual_revenue):
+        annual_revenue = 0
+    revenue_fit = 100 if annual_revenue >= minimum_revenue else round(
+        max(0, min(100, 100 * annual_revenue / minimum_revenue))
+    )
+    score = round(0.4 * revenue_fit + 0.6 * tech_stack_match)
     user = (
+        "Computed scoring values:\n" + json.dumps({
+            "revenue_fit": revenue_fit,
+            "tech_stack_match": tech_stack_match,
+            "present_required_technologies": present_technologies,
+            "missing_required_technologies": missing_technologies,
+            "score": score,
+        }, indent=2) +
+        "\n\n" +
         "Offering:\n" + json.dumps(offering, indent=2) +
         "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
     )
@@ -119,7 +138,16 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
     ])
-    return result.model_dump()
+    return {
+        "score": score,
+        "max_score": 100,
+        "justification": result.justification,
+        "rubric_breakdown": {
+            "revenue_fit": revenue_fit,
+            "tech_stack_match": tech_stack_match,
+            "component_max": 100,
+        },
+    }
 
 
 @tool
